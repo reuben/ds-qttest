@@ -5,7 +5,7 @@ import queue
 import sys
 import threading
 
-from PySide2.QtCore import QObject, Signal, Slot
+from PySide2.QtCore import QObject, Signal, Slot, QTimer
 from PySide2.QtWidgets import QApplication, QLabel, QPushButton, QVBoxLayout, QWidget
 from PySide2.QtMultimedia import QAudioFormat, QAudioDeviceInfo, QAudioInput
 
@@ -13,8 +13,6 @@ from deepspeech import Model
 import numpy as np
 
 
-N_FEATURES = 26
-N_CONTEXT = 9
 BEAM_WIDTH = 500
 LM_ALPHA = 0.75
 LM_BETA = 1.85
@@ -23,12 +21,12 @@ LM_BETA = 1.85
 class InferenceThread(QObject):
     finished = Signal(str)
 
-    def __init__(self, model, alphabet, lmbin, trie):
+    def __init__(self, model, lmbin, trie):
         super(InferenceThread, self).__init__()
         self._in_queue = queue.Queue()
         self._should_quit = False
         self._worker = threading.Thread(target=self.run,
-                                        args=(model, alphabet, lmbin, trie))
+                                        args=(model, lmbin, trie))
 
     def send_cmd(self, cmd):
         ''' Insert command in queue to be processed by the thread '''
@@ -41,9 +39,10 @@ class InferenceThread(QObject):
     def start(self):
         self._worker.start()
 
-    def run(self, model, alphabet, lmbin, trie):
-        model = Model(model, N_FEATURES, N_CONTEXT, alphabet, BEAM_WIDTH)
-        model.enableDecoderWithLM(alphabet, lmbin, trie, LM_ALPHA, LM_BETA)
+    def run(self, model, lmbin, trie):
+        model = Model(model, BEAM_WIDTH)
+        if lmbin:
+            model.enableDecoderWithLM(lmbin, trie, LM_ALPHA, LM_BETA)
         stream = None
 
         while True:
@@ -61,7 +60,7 @@ class InferenceThread(QObject):
 
             if cmd == 'start':
                 # 'start' means create a new stream
-                stream = model.setupStream()
+                stream = model.createStream()
             elif cmd == 'data':
                 # 'data' means we received more audio data from the recorder
                 if stream:
@@ -118,6 +117,7 @@ class Dialog(QWidget):
             self._is_recording = True
             self._label.setText('...')
             self._btn.setText('Stop')
+            self._buffer = bytearray()
             self._inference_thread.send_cmd(('start',))
             # QAudioInput retains the QIODevice returned here internally so
             # there's no need to keep a reference to it
@@ -128,7 +128,9 @@ class Dialog(QWidget):
     def _read_from_io_device(self):
         ''' Forward available audio data to the inference thread. '''
         # self.sender() is the IO device returned by QAudioInput.start()
-        self._inference_thread.send_cmd(('data', self.sender().readAll()))
+        data = self.sender().readAll()
+        self._inference_thread.send_cmd(('data', data))
+        self._buffer += data.data()
 
     @Slot(str)
     def _on_transcription_finished(self, result):
@@ -139,13 +141,12 @@ class Dialog(QWidget):
 def main():
     parser = argparse.ArgumentParser(description='Streaming speech-to-text using deepspeech and PySide2')
     parser.add_argument('--model', required=True, help='Path to the model (protocol buffer binary file, .pb or .pbmm or .tflite)')
-    parser.add_argument('--alphabet', required=True, help='Path to the configuration file specifying the alphabet used by the network (alphabet.txt)')
     parser.add_argument('--lm', nargs='?', help='Path to the language model binary file (lm.binary)')
     parser.add_argument('--trie', nargs='?', help='Path to the language model trie file created with native_client/generate_trie (trie)')
     args, unknown_args = parser.parse_known_args()
 
     # Create inference thread
-    inference_thread = InferenceThread(args.model, args.alphabet, args.lm, args.trie)
+    inference_thread = InferenceThread(args.model, args.lm, args.trie)
 
     app = QApplication(unknown_args)
     dialog = Dialog(inference_thread)
